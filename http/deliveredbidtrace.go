@@ -20,7 +20,7 @@ import (
 	"time"
 
 	"github.com/attestantio/go-eth2-client/spec/phase0"
-	"github.com/attestantio/go-relay-client/api/v1"
+	v1 "github.com/attestantio/go-relay-client/api/v1"
 	"github.com/pkg/errors"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -31,14 +31,66 @@ import (
 // Will return nil if the relay did not deliver a bid for the slot.
 func (s *Service) DeliveredBidTrace(ctx context.Context, slot phase0.Slot) (*v1.BidTrace, error) {
 	ctx, span := otel.Tracer("attestantio.go-relay-client.http").Start(ctx, "DeliveredBidTrace", trace.WithAttributes(
-
 		attribute.Int64("slot", int64(slot)),
 	))
 	defer span.End()
 
 	started := time.Now()
-
 	url := fmt.Sprintf("/relay/v1/data/bidtraces/proposer_payload_delivered?slot=%d", slot)
+
+	contentType, respBodyReader, err := s.get(ctx, url)
+	if err != nil {
+		log.Trace().Str("url", url).Err(err).Msg("Request failed")
+		monitorOperation(s.Address(), "delivered bid trace", false, time.Since(started))
+
+		return nil, errors.Wrap(err, "failed to request delivered bid trace")
+	}
+
+	if respBodyReader == nil {
+		monitorOperation(s.Address(), "delivered bid trace", false, time.Since(started))
+		return nil, errors.New("failed to obtain delivered bid trace")
+	}
+
+	var res *v1.BidTrace
+
+	switch contentType {
+	case ContentTypeJSON:
+		if err := json.NewDecoder(respBodyReader).Decode(&res); err != nil {
+			return nil, errors.Wrap(err, "failed to parse delivered bid trace")
+		}
+	default:
+		return nil, fmt.Errorf("unsupported content type %v", contentType)
+	}
+
+	if res == nil {
+		// This means there was no delivered bid trace, but that's an acceptable response.
+		monitorOperation(s.Address(), "delivered bid trace", true, time.Since(started))
+		return nil, nil
+	}
+
+	monitorOperation(s.Address(), "delivered bid trace", true, time.Since(started))
+
+	return res, nil
+}
+
+// DeliveredBidTracesCursor provides bid traces for delivered payloads using cursor-based pagination.
+// cursor is the upper-bound slot (inclusive): the relay returns results where slot <= cursor, ordered
+// by slot descending (most-recent-first). limit controls the maximum number of results returned.
+// limit must be greater than zero; a non-positive value returns an error.
+// Returns nil if the relay did not deliver any bids in the queried range.
+func (s *Service) DeliveredBidTracesCursor(ctx context.Context, cursor phase0.Slot, limit int) ([]*v1.BidTrace, error) {
+	ctx, span := otel.Tracer("attestantio.go-relay-client.http").Start(ctx, "DeliveredBidTracesCursor", trace.WithAttributes(
+		attribute.Int64("cursor", int64(cursor)),
+		attribute.Int64("limit", int64(limit)),
+	))
+	defer span.End()
+
+	if limit <= 0 {
+		return nil, errors.New("limit must be greater than zero")
+	}
+
+	started := time.Now()
+	url := fmt.Sprintf("/relay/v1/data/bidtraces/proposer_payload_delivered?cursor=%d&limit=%d", cursor, limit)
 
 	contentType, respBodyReader, err := s.get(ctx, url)
 	if err != nil {
@@ -72,5 +124,5 @@ func (s *Service) DeliveredBidTrace(ctx context.Context, slot phase0.Slot) (*v1.
 
 	monitorOperation(s.Address(), "delivered bid trace", true, time.Since(started))
 
-	return res[0], nil
+	return res, nil
 }
